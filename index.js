@@ -1,3 +1,4 @@
+const keepAlive = require('./server.js');
 require('dotenv').config();
 const fs = require('node:fs');
 const path = require('node:path');
@@ -100,3 +101,4 @@ client.on(Events.InteractionCreate, async interaction => {
 });
 
 client.login(token);
+keepAlive();
