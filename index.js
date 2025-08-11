@@ -11,16 +11,42 @@ const play = require('play-dl');
 const Canvas = require('@napi-rs/canvas');
 
 // ===================================================
+//               اجرای مایگریشن‌های دیتابیس
+// ===================================================
+console.log('در حال بررسی مایگریشن‌های دیتابیس...');
+try {
+    db.exec(`CREATE TABLE IF NOT EXISTS migrations (id INTEGER PRIMARY KEY, name TEXT UNIQUE)`);
+    const appliedMigrations = db.prepare('SELECT name FROM migrations').all().map(row => row.name);
+    const migrationFiles = fs.readdirSync('./migrations').sort();
+    const pendingMigrations = migrationFiles.filter(file => !appliedMigrations.includes(file));
+
+    if (pendingMigrations.length === 0) {
+        console.log('✅ دیتابیس به‌روز است.');
+    } else {
+        console.log(`مایگریشن‌های جدید یافت شد: ${pendingMigrations.join(', ')}`);
+        for (const file of pendingMigrations) {
+            const filePath = path.join('./migrations', file);
+            const sql = fs.readFileSync(filePath, 'utf8');
+            const runMigration = db.transaction(() => {
+                db.exec(sql);
+                db.prepare('INSERT INTO migrations (name) VALUES (?)').run(file);
+            });
+            runMigration();
+            console.log(`✅ مایگریشن ${file} با موفقیت اجرا شد.`);
+        }
+    }
+} catch (err) {
+    console.error('❌ خطا در اجرای مایگریشن دیتابیس:', err);
+    process.exit(1);
+}
+
+// ===================================================
 //        احراز هویت برای سیستم موزیک (play-dl)
 // ===================================================
 async function authPlayDL() {
     try {
         if (process.env.YT_COOKIE) {
-            await play.setToken({
-                youtube: {
-                    cookie: process.env.YT_COOKIE
-                }
-            });
+            await play.setToken({ youtube: { cookie: process.env.YT_COOKIE } });
             console.log('✅ با موفقیت به یوتیوب با کوکی متصل شد.');
         } else {
             console.warn('⚠️ کوکی یوتیوب (YT_COOKIE) پیدا نشد.');
@@ -46,28 +72,26 @@ const client = new Client({
     ]
 });
 
-// متغیر برای مدیریت کول‌داون XP
 const xpCooldowns = new Set();
 
 // ===================================================
 //             مدیریت خطاهای سراسری
 // ===================================================
-const errorChannelId = process.env.ERROR_LOG_CHANNEL_ID; 
-
 process.on('unhandledRejection', async (reason, promise) => {
     console.error('Unhandled Rejection at:', promise, 'reason:', reason);
-    if (!errorChannelId) return;
-    const errorChannel = await client.channels.fetch(errorChannelId).catch(() => null);
+    const settings = db.prepare('SELECT log_channel_id FROM guild_settings LIMIT 1').get();
+    if (!settings || !settings.log_channel_id) return;
+    const errorChannel = await client.channels.fetch(settings.log_channel_id).catch(() => null);
     if (errorChannel) {
         const embed = new EmbedBuilder().setTitle('❌ Unhandled Rejection').setDescription(`\`\`\`${reason.stack || reason}\`\`\``).setColor('Red').setTimestamp();
         try { await errorChannel.send({ embeds: [embed] }); } catch (e) { console.error("Error sending error log:", e); }
     }
 });
-
 process.on('uncaughtException', async (err, origin) => {
     console.error('Uncaught Exception:', err, 'origin:', origin);
-    if (!errorChannelId) return;
-    const errorChannel = await client.channels.fetch(errorChannelId).catch(() => null);
+    const settings = db.prepare('SELECT log_channel_id FROM guild_settings LIMIT 1').get();
+    if (!settings || !settings.log_channel_id) return;
+    const errorChannel = await client.channels.fetch(settings.log_channel_id).catch(() => null);
     if (errorChannel) {
         const embed = new EmbedBuilder().setTitle('💥 Uncaught Exception').setDescription(`\`\`\`${err.stack || err}\`\`\``).setColor('Red').setTimestamp();
         try { await errorChannel.send({ embeds: [embed] }); } catch (e) { console.error("Error sending error log:", e); }
@@ -96,7 +120,6 @@ for (const file of commandFiles) {
 client.once(Events.ClientReady, readyClient => {
     console.log(`✅ بات به عنوان ${readyClient.user.tag} آنلاین شد!`);
 
-    // حلقه مدیریت قرعه‌کشی‌ها
     setInterval(() => {
         const endedGiveaways = db.prepare('SELECT * FROM giveaways WHERE end_time <= ?').all(Date.now());
         endedGiveaways.forEach(async giveaway => {
@@ -148,6 +171,13 @@ client.on(Events.InteractionCreate, async interaction => {
                 if (action === 'accept') {
                     db.prepare('UPDATE users SET clan_id = ? WHERE user_id = ?').run(request.clan_id, request.user_id);
                     db.prepare('UPDATE clan_requests SET status = ? WHERE request_id = ?').run('accepted', requestId);
+                    
+                    interaction.guild.members.fetch(request.user_id).then(member => {
+                        if (member && clan.role_id) {
+                            member.roles.add(clan.role_id);
+                        }
+                    }).catch(console.error);
+
                     interaction.update({ content: `✅ درخواست عضویت قبول شد.`, components: [] });
                     client.users.fetch(request.user_id).then(user => user.send(`درخواست عضویت شما در کلن **${clan.name}** تایید شد!`)).catch(console.error);
                 } else if (action === 'deny') {
@@ -181,7 +211,6 @@ client.on(Events.InteractionCreate, async interaction => {
 //             تابع و رویداد خوش‌آمدگویی
 // ===================================================
 Canvas.GlobalFonts.registerFromPath('./font.ttf', 'Vazirmatn');
-
 async function createWelcomeImage(member) {
     const canvas = Canvas.createCanvas(735, 490);
     const ctx = canvas.getContext('2d');
@@ -201,13 +230,11 @@ async function createWelcomeImage(member) {
     ctx.drawImage(avatar, 242.5, 50, 250, 250);
     return await canvas.encode('png');
 }
-
 client.on(Events.GuildMemberAdd, async member => {
     const settings = db.prepare('SELECT * FROM guild_settings WHERE guild_id = ?').get(member.guild.id);
     if (!settings || !settings.welcome_channel_id) return;
     const welcomeChannel = member.guild.channels.cache.get(settings.welcome_channel_id);
     if (!welcomeChannel) return;
-
     try {
         const imageBuffer = await createWelcomeImage(member);
         const attachment = new AttachmentBuilder(imageBuffer, { name: 'welcome-image.png' });
@@ -223,26 +250,37 @@ client.on(Events.GuildMemberAdd, async member => {
 // ===================================================
 client.on(Events.MessageCreate, async message => {
     if (message.author.bot || !message.guild) return;
-
     const userData = db.prepare('SELECT * FROM users WHERE user_id = ? AND guild_id = ?').get(message.author.id, message.guild.id);
     if (!userData) return;
-
     const cooldownKey = `${message.guild.id}-${message.author.id}`;
     if (xpCooldowns.has(cooldownKey)) return;
-
     const xpToAdd = Math.floor(Math.random() * 11) + 15;
     const newXp = userData.xp + xpToAdd;
     const xpNeededForNextLevel = userData.level * 150;
-
     if (newXp >= xpNeededForNextLevel) {
         const newLevel = userData.level + 1;
         const remainingXp = newXp - xpNeededForNextLevel;
         db.prepare('UPDATE users SET level = ?, xp = ? WHERE user_id = ? AND guild_id = ?').run(newLevel, remainingXp, message.author.id, message.guild.id);
         message.channel.send(`🎉 تبریک ${message.author}، شما به **سطح ${newLevel}** رسیدید!`);
+        if (userData.clan_id) {
+            const clanXpToAdd = 5;
+            const clanData = db.prepare('SELECT * FROM clans WHERE clan_id = ?').get(userData.clan_id);
+            if (clanData) {
+                const newClanXp = clanData.xp + clanXpToAdd;
+                const xpNeededForClanLevelUp = clanData.level * 500;
+                if (newClanXp >= xpNeededForClanLevelUp) {
+                    const newClanLevel = clanData.level + 1;
+                    const remainingClanXp = newClanXp - xpNeededForClanLevelUp;
+                    db.prepare('UPDATE clans SET level = ?, xp = ? WHERE clan_id = ?').run(newClanLevel, remainingClanXp, userData.clan_id);
+                    message.channel.send(`⚔️ کلن **${clanData.name}** به **سطح ${newClanLevel}** رسید!`);
+                } else {
+                    db.prepare('UPDATE clans SET xp = ? WHERE clan_id = ?').run(newClanXp, userData.clan_id);
+                }
+            }
+        }
     } else {
         db.prepare('UPDATE users SET xp = ? WHERE user_id = ? AND guild_id = ?').run(newXp, message.author.id, message.guild.id);
     }
-    
     xpCooldowns.add(cooldownKey);
     setTimeout(() => {
         xpCooldowns.delete(cooldownKey);
