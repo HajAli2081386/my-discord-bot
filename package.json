@@ -1,31 +1,37 @@
 {
   "name": "my-discord-bot",
   "version": "1.0.0",
-  "description": "",
+  "description": "یک بات دیسکورد پیشرفته با قابلیت‌های متنوع",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node index.js"
+    "start": "node index.js",
+    "test": "jest"
   },
-  "engines": {
-    "node": "18.x"
-  },
-  "keywords": [],
-  "author": "",
+  "keywords": [
+    "discord",
+    "bot",
+    "discord.js"
+  ],
+  "author": "Your Name",
   "license": "ISC",
   "dependencies": {
     "@discordjs/rest": "^2.3.0",
-    "@discordjs/voice": "^0.18.0",
-    "@napi-rs/canvas": "^0.1.74",
+    "@discordjs/voice": "^0.17.0",
+    "@napi-rs/canvas": "^0.1.52",
     "better-sqlite3": "^11.1.2",
     "discord-api-types": "^0.37.92",
     "discord.js": "^14.15.3",
     "dotenv": "^16.4.5",
-    "express": "^5.1.0",
+    "express": "^4.19.2",
     "ffmpeg-static": "^5.2.0",
     "ms": "^2.1.3",
     "opusscript": "^0.0.8",
-    "play-dl": "^1.9.7",
-    "sodium-native": "^5.0.6"
+    "play-dl": "^1.9.7"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0"
+  },
+  "engines": {
+    "node": "18.x"
   }
 }

@@ -23,7 +23,7 @@ async function authPlayDL() {
             });
             console.log('✅ با موفقیت به یوتیوب با کوکی متصل شد.');
         } else {
-            console.warn('⚠️ کوکی یوتیوب (YT_COOKIE) پیدا نشد. ممکن است در پخش موزیک مشکل ایجاد شود.');
+            console.warn('⚠️ کوکی یوتیوب (YT_COOKIE) پیدا نشد.');
         }
     } catch (e) {
         console.error('❌ خطا در هنگام تنظیم کوکی یوتیوب:', e.message);
@@ -46,13 +46,40 @@ const client = new Client({
     ]
 });
 
+// متغیر برای مدیریت کول‌داون XP
+const xpCooldowns = new Set();
+
+// ===================================================
+//             مدیریت خطاهای سراسری
+// ===================================================
+const errorChannelId = process.env.ERROR_LOG_CHANNEL_ID; 
+
+process.on('unhandledRejection', async (reason, promise) => {
+    console.error('Unhandled Rejection at:', promise, 'reason:', reason);
+    if (!errorChannelId) return;
+    const errorChannel = await client.channels.fetch(errorChannelId).catch(() => null);
+    if (errorChannel) {
+        const embed = new EmbedBuilder().setTitle('❌ Unhandled Rejection').setDescription(`\`\`\`${reason.stack || reason}\`\`\``).setColor('Red').setTimestamp();
+        try { await errorChannel.send({ embeds: [embed] }); } catch (e) { console.error("Error sending error log:", e); }
+    }
+});
+
+process.on('uncaughtException', async (err, origin) => {
+    console.error('Uncaught Exception:', err, 'origin:', origin);
+    if (!errorChannelId) return;
+    const errorChannel = await client.channels.fetch(errorChannelId).catch(() => null);
+    if (errorChannel) {
+        const embed = new EmbedBuilder().setTitle('💥 Uncaught Exception').setDescription(`\`\`\`${err.stack || err}\`\`\``).setColor('Red').setTimestamp();
+        try { await errorChannel.send({ embeds: [embed] }); } catch (e) { console.error("Error sending error log:", e); }
+    }
+});
+
 // ===================================================
 //                   بارگذاری دستورات
 // ===================================================
 client.commands = new Collection();
 const commandsPath = path.join(__dirname, 'commands');
 const commandFiles = fs.readdirSync(commandsPath).filter(file => file.endsWith('.js'));
-
 for (const file of commandFiles) {
     const filePath = path.join(commandsPath, file);
     const command = require(filePath);
@@ -72,9 +99,27 @@ client.once(Events.ClientReady, readyClient => {
     // حلقه مدیریت قرعه‌کشی‌ها
     setInterval(() => {
         const endedGiveaways = db.prepare('SELECT * FROM giveaways WHERE end_time <= ?').all(Date.now());
-
         endedGiveaways.forEach(async giveaway => {
-            // ... (منطق کامل قرعه‌کشی)
+            const channel = await client.channels.fetch(giveaway.channel_id).catch(console.error);
+            if (!channel) { db.prepare('DELETE FROM giveaways WHERE message_id = ?').run(giveaway.message_id); return; }
+            const message = await channel.messages.fetch(giveaway.message_id).catch(console.error);
+            if (!message) { db.prepare('DELETE FROM giveaways WHERE message_id = ?').run(giveaway.message_id); return; }
+            const entrants = JSON.parse(giveaway.entrants);
+            if (entrants.length === 0) {
+                await channel.send(`قرعه‌کشی برای **${giveaway.prize}** به پایان رسید اما هیچ شرکت‌کننده‌ای وجود نداشت!`);
+                message.edit({ components: [] });
+            } else {
+                const winners = [];
+                const shuffledEntrants = entrants.sort(() => 0.5 - Math.random());
+                for (let i = 0; i < giveaway.winner_count && i < shuffledEntrants.length; i++) {
+                    winners.push(`<@${shuffledEntrants[i]}>`);
+                }
+                const winnerAnnouncement = new EmbedBuilder().setTitle(`🎉 قرعه کشی به پایان رسید! 🎉`).setDescription(`**جایزه:** ${giveaway.prize}\n**برندگان:** ${winners.join(', ')}`).setColor('Green').setTimestamp();
+                await channel.send({ content: `تبریک به برندگان! ${winners.join(', ')}`, embeds: [winnerAnnouncement] });
+                const endedEmbed = EmbedBuilder.from(message.embeds[0]).setDescription(`قرعه کشی تمام شد!\n**برندگان:** ${winners.join(', ')}`).setTimestamp();
+                message.edit({ embeds: [endedEmbed], components: [] });
+            }
+            db.prepare('DELETE FROM giveaways WHERE message_id = ?').run(giveaway.message_id);
         });
     }, 15000);
 });
@@ -83,63 +128,125 @@ client.once(Events.ClientReady, readyClient => {
 //             رویداد مدیریت تعاملات (Interactions)
 // ===================================================
 client.on(Events.InteractionCreate, async interaction => {
-    // ... (منطق کامل مدیریت دکمه‌ها و اسلش کامندها)
+    if (interaction.isButton()) {
+        if (interaction.customId === 'enter_giveaway') {
+            const giveaway = db.prepare('SELECT * FROM giveaways WHERE message_id = ?').get(interaction.message.id);
+            if (!giveaway) return interaction.reply({ content: 'این قرعه‌کشی دیگر فعال نیست.', ephemeral: true });
+            let entrants = JSON.parse(giveaway.entrants);
+            if (entrants.includes(interaction.user.id)) return interaction.reply({ content: 'شما قبلاً در این قرعه‌کشی شرکت کرده‌اید!', ephemeral: true });
+            entrants.push(interaction.user.id);
+            db.prepare('UPDATE giveaways SET entrants = ? WHERE message_id = ?').run(JSON.stringify(entrants), interaction.message.id);
+            return interaction.reply({ content: 'شما با موفقیت در قرعه‌کشی شرکت کردید!', ephemeral: true });
+        }
+        if (interaction.customId.startsWith('clan_')) {
+            const [action, requestId] = interaction.customId.split('_').slice(1);
+            const request = db.prepare('SELECT * FROM clan_requests WHERE request_id = ? AND status = ?').get(requestId, 'pending');
+            if (!request) return interaction.update({ content: 'این درخواست دیگر معتبر نیست.', components: [] });
+            const clan = db.prepare('SELECT * FROM clans WHERE clan_id = ?').get(request.clan_id);
+            if (clan.owner_id !== interaction.user.id) return interaction.reply({ content: 'شما اجازه مدیریت این درخواست را ندارید!', ephemeral: true });
+            const transaction = db.transaction(() => {
+                if (action === 'accept') {
+                    db.prepare('UPDATE users SET clan_id = ? WHERE user_id = ?').run(request.clan_id, request.user_id);
+                    db.prepare('UPDATE clan_requests SET status = ? WHERE request_id = ?').run('accepted', requestId);
+                    interaction.update({ content: `✅ درخواست عضویت قبول شد.`, components: [] });
+                    client.users.fetch(request.user_id).then(user => user.send(`درخواست عضویت شما در کلن **${clan.name}** تایید شد!`)).catch(console.error);
+                } else if (action === 'deny') {
+                    db.prepare('UPDATE clan_requests SET status = ? WHERE request_id = ?').run('denied', requestId);
+                    interaction.update({ content: `❌ درخواست عضویت رد شد.`, components: [] });
+                    client.users.fetch(request.user_id).then(user => user.send(`متاسفانه درخواست عضویت شما در کلن **${clan.name}** رد شد.`)).catch(console.error);
+                }
+            });
+            transaction();
+            return;
+        }
+    }
+
+    if (!interaction.isChatInputCommand()) return;
+    const command = client.commands.get(interaction.commandName);
+    if (!command) return;
+
+    try {
+        await command.execute(interaction);
+    } catch (error) {
+        console.error(error);
+        if (interaction.replied || interaction.deferred) {
+            await interaction.followUp({ content: 'خطایی در اجرای این دستور رخ داد!', ephemeral: true });
+        } else {
+            await interaction.reply({ content: 'خطایی در اجرای این دستور رخ داد!', ephemeral: true });
+        }
+    }
 });
 
 // ===================================================
 //             تابع و رویداد خوش‌آمدگویی
 // ===================================================
+Canvas.GlobalFonts.registerFromPath('./font.ttf', 'Vazirmatn');
 
-// --- بخش اصلاح شده برای ظاهر بهتر عکس ---
 async function createWelcomeImage(member) {
-    const canvas = Canvas.createCanvas(700, 250);
+    const canvas = Canvas.createCanvas(735, 490);
     const ctx = canvas.getContext('2d');
-
-    // ۱. کشیدن عکس پس‌زمینه
     const background = await Canvas.loadImage('./background.png');
     ctx.drawImage(background, 0, 0, canvas.width, canvas.height);
-
-    // ۲. نوشتن نام کاربر
-    ctx.font = '35px "Vazirmatn"'; // اندازه فونت کمی تغییر کرد
     ctx.fillStyle = '#ffffff';
     ctx.textAlign = 'center';
-    // مختصات متن نام برای قرار گرفتن در بالای عکس
-    ctx.fillText(member.user.displayName, canvas.width / 2, 225);
-
-    // ۳. نوشتن متن خوش‌آمدگویی
-    ctx.font = '28px "Vazirmatn"';
-    // مختصات متن خوش‌آمدگویی برای قرار گرفتن بالای نام
-    ctx.fillText(`به سرور ما خوش آمدی`, canvas.width / 2, 185);
-
-    // ۴. کشیدن عکس پروفایل کاربر (به صورت دایره و در مرکز)
+    ctx.font = '50px "Vazirmatn"';
+    ctx.fillText(`خوش آمدی`, canvas.width / 2, 350);
+    ctx.font = '60px "Vazirmatn"';
+    ctx.fillText(member.user.displayName, canvas.width / 2, 420);
     ctx.beginPath();
-    // مختصات دایره برای قرار گرفتن در مرکز
-    ctx.arc(350, 95, 70, 0, Math.PI * 2, true);
+    ctx.arc(367.5, 175, 125, 0, Math.PI * 2, true);
     ctx.closePath();
-    ctx.clip(); // ایجاد ماسک دایره‌ای
-
+    ctx.clip();
     const avatar = await Canvas.loadImage(member.user.displayAvatarURL({ extension: 'png' }));
-    // مختصات عکس پروفایل برای پر کردن دایره
-    ctx.drawImage(avatar, 280, 25, 140, 140);
-
+    ctx.drawImage(avatar, 242.5, 50, 250, 250);
     return await canvas.encode('png');
 }
 
 client.on(Events.GuildMemberAdd, async member => {
-    const welcomeChannelId = '1217486913800376380'; // آیدی کانال را اینجا قرار دهید
-    const welcomeChannel = member.guild.channels.cache.get(welcomeChannelId);
+    const settings = db.prepare('SELECT * FROM guild_settings WHERE guild_id = ?').get(member.guild.id);
+    if (!settings || !settings.welcome_channel_id) return;
+    const welcomeChannel = member.guild.channels.cache.get(settings.welcome_channel_id);
     if (!welcomeChannel) return;
 
     try {
-        Canvas.GlobalFonts.registerFromPath('./font.ttf', 'Vazirmatn');
         const imageBuffer = await createWelcomeImage(member);
         const attachment = new AttachmentBuilder(imageBuffer, { name: 'welcome-image.png' });
-        
         const welcomeMessage = `سلام ${member}، به سرور ما خوش اومدی! 🎉`;
         welcomeChannel.send({ content: welcomeMessage, files: [attachment] });
     } catch (error) {
-        console.error("خطا در ساخت عکس خوش آمدگویی:", error);
+        console.error("خطا در ساخت یا ارسال عکس خوش آمدگویی:", error);
     }
+});
+
+// ===================================================
+//              رویداد کسب XP (سیستم Leveling)
+// ===================================================
+client.on(Events.MessageCreate, async message => {
+    if (message.author.bot || !message.guild) return;
+
+    const userData = db.prepare('SELECT * FROM users WHERE user_id = ? AND guild_id = ?').get(message.author.id, message.guild.id);
+    if (!userData) return;
+
+    const cooldownKey = `${message.guild.id}-${message.author.id}`;
+    if (xpCooldowns.has(cooldownKey)) return;
+
+    const xpToAdd = Math.floor(Math.random() * 11) + 15;
+    const newXp = userData.xp + xpToAdd;
+    const xpNeededForNextLevel = userData.level * 150;
+
+    if (newXp >= xpNeededForNextLevel) {
+        const newLevel = userData.level + 1;
+        const remainingXp = newXp - xpNeededForNextLevel;
+        db.prepare('UPDATE users SET level = ?, xp = ? WHERE user_id = ? AND guild_id = ?').run(newLevel, remainingXp, message.author.id, message.guild.id);
+        message.channel.send(`🎉 تبریک ${message.author}، شما به **سطح ${newLevel}** رسیدید!`);
+    } else {
+        db.prepare('UPDATE users SET xp = ? WHERE user_id = ? AND guild_id = ?').run(newXp, message.author.id, message.guild.id);
+    }
+    
+    xpCooldowns.add(cooldownKey);
+    setTimeout(() => {
+        xpCooldowns.delete(cooldownKey);
+    }, 60000);
 });
 
 // ===================================================
