@@ -13,17 +13,16 @@ const Canvas = require('@napi-rs/canvas');
 // ===================================================
 //               اجرای مایگریشن‌های دیتابیس
 // ===================================================
-console.log('در حال بررسی مایگریشن‌های دیتابیس...');
+console.log('Checking database migrations...');
 try {
     db.exec(`CREATE TABLE IF NOT EXISTS migrations (id INTEGER PRIMARY KEY, name TEXT UNIQUE)`);
     const appliedMigrations = db.prepare('SELECT name FROM migrations').all().map(row => row.name);
     const migrationFiles = fs.readdirSync('./migrations').sort();
     const pendingMigrations = migrationFiles.filter(file => !appliedMigrations.includes(file));
-
     if (pendingMigrations.length === 0) {
-        console.log('✅ دیتابیس به‌روز است.');
+        console.log('✅ Database is up to date.');
     } else {
-        console.log(`مایگریشن‌های جدید یافت شد: ${pendingMigrations.join(', ')}`);
+        console.log(`Found new migrations: ${pendingMigrations.join(', ')}`);
         for (const file of pendingMigrations) {
             const filePath = path.join('./migrations', file);
             const sql = fs.readFileSync(filePath, 'utf8');
@@ -32,11 +31,11 @@ try {
                 db.prepare('INSERT INTO migrations (name) VALUES (?)').run(file);
             });
             runMigration();
-            console.log(`✅ مایگریشن ${file} با موفقیت اجرا شد.`);
+            console.log(`✅ Successfully applied migration: ${file}`);
         }
     }
 } catch (err) {
-    console.error('❌ خطا در اجرای مایگریشن دیتابیس:', err);
+    console.error('❌ Failed to apply database migrations:', err);
     process.exit(1);
 }
 
@@ -47,12 +46,12 @@ async function authPlayDL() {
     try {
         if (process.env.YT_COOKIE) {
             await play.setToken({ youtube: { cookie: process.env.YT_COOKIE } });
-            console.log('✅ با موفقیت به یوتیوب با کوکی متصل شد.');
+            console.log('✅ Successfully authenticated with YouTube using cookies.');
         } else {
-            console.warn('⚠️ کوکی یوتیوب (YT_COOKIE) پیدا نشد.');
+            console.warn('⚠️ YouTube Cookie (YT_COOKIE) not found. Music playback might fail.');
         }
     } catch (e) {
-        console.error('❌ خطا در هنگام تنظیم کوکی یوتیوب:', e.message);
+        console.error('❌ Error setting YouTube cookie:', e.message);
     }
 }
 authPlayDL();
@@ -73,6 +72,14 @@ const client = new Client({
 });
 
 const xpCooldowns = new Set();
+
+// نقشه رول‌ها بر اساس سطح با آیدی‌های شما
+const levelRoles = new Map([
+    [5, '1405041828104765605'],
+    [10, '1405041875542605854'],
+    [15, '1405041914075545671'],
+    [20, '1405041953489289316']
+]);
 
 // ===================================================
 //             مدیریت خطاهای سراسری
@@ -110,7 +117,7 @@ for (const file of commandFiles) {
     if ('data' in command && 'execute' in command) {
         client.commands.set(command.data.name, command);
     } else {
-        console.log(`[WARNING] دستور در ${filePath} ناقص است.`);
+        console.log(`[WARNING] The command at ${filePath} is missing a required "data" or "execute" property.`);
     }
 }
 
@@ -118,7 +125,7 @@ for (const file of commandFiles) {
 //                  رویداد ClientReady
 // ===================================================
 client.once(Events.ClientReady, readyClient => {
-    console.log(`✅ بات به عنوان ${readyClient.user.tag} آنلاین شد!`);
+    console.log(`✅ Logged in as ${readyClient.user.tag}!`);
 
     setInterval(() => {
         const endedGiveaways = db.prepare('SELECT * FROM giveaways WHERE end_time <= ?').all(Date.now());
@@ -129,7 +136,7 @@ client.once(Events.ClientReady, readyClient => {
             if (!message) { db.prepare('DELETE FROM giveaways WHERE message_id = ?').run(giveaway.message_id); return; }
             const entrants = JSON.parse(giveaway.entrants);
             if (entrants.length === 0) {
-                await channel.send(`قرعه‌کشی برای **${giveaway.prize}** به پایان رسید اما هیچ شرکت‌کننده‌ای وجود نداشت!`);
+                await channel.send(`The giveaway for **${giveaway.prize}** has ended with no participants!`);
                 message.edit({ components: [] });
             } else {
                 const winners = [];
@@ -137,9 +144,9 @@ client.once(Events.ClientReady, readyClient => {
                 for (let i = 0; i < giveaway.winner_count && i < shuffledEntrants.length; i++) {
                     winners.push(`<@${shuffledEntrants[i]}>`);
                 }
-                const winnerAnnouncement = new EmbedBuilder().setTitle(`🎉 قرعه کشی به پایان رسید! 🎉`).setDescription(`**جایزه:** ${giveaway.prize}\n**برندگان:** ${winners.join(', ')}`).setColor('Green').setTimestamp();
-                await channel.send({ content: `تبریک به برندگان! ${winners.join(', ')}`, embeds: [winnerAnnouncement] });
-                const endedEmbed = EmbedBuilder.from(message.embeds[0]).setDescription(`قرعه کشی تمام شد!\n**برندگان:** ${winners.join(', ')}`).setTimestamp();
+                const winnerAnnouncement = new EmbedBuilder().setTitle(`🎉 Giveaway Ended! 🎉`).setDescription(`**Prize:** ${giveaway.prize}\n**Winners:** ${winners.join(', ')}`).setColor('Green').setTimestamp();
+                await channel.send({ content: `Congratulations to the winners! ${winners.join(', ')}`, embeds: [winnerAnnouncement] });
+                const endedEmbed = EmbedBuilder.from(message.embeds[0]).setDescription(`Giveaway has ended!\n**Winners:** ${winners.join(', ')}`).setTimestamp();
                 message.edit({ embeds: [endedEmbed], components: [] });
             }
             db.prepare('DELETE FROM giveaways WHERE message_id = ?').run(giveaway.message_id);
@@ -154,36 +161,34 @@ client.on(Events.InteractionCreate, async interaction => {
     if (interaction.isButton()) {
         if (interaction.customId === 'enter_giveaway') {
             const giveaway = db.prepare('SELECT * FROM giveaways WHERE message_id = ?').get(interaction.message.id);
-            if (!giveaway) return interaction.reply({ content: 'این قرعه‌کشی دیگر فعال نیست.', ephemeral: true });
+            if (!giveaway) return interaction.reply({ content: 'This giveaway is no longer active.', ephemeral: true });
             let entrants = JSON.parse(giveaway.entrants);
-            if (entrants.includes(interaction.user.id)) return interaction.reply({ content: 'شما قبلاً در این قرعه‌کشی شرکت کرده‌اید!', ephemeral: true });
+            if (entrants.includes(interaction.user.id)) return interaction.reply({ content: 'You have already entered this giveaway!', ephemeral: true });
             entrants.push(interaction.user.id);
             db.prepare('UPDATE giveaways SET entrants = ? WHERE message_id = ?').run(JSON.stringify(entrants), interaction.message.id);
-            return interaction.reply({ content: 'شما با موفقیت در قرعه‌کشی شرکت کردید!', ephemeral: true });
+            return interaction.reply({ content: 'You have successfully entered the giveaway!', ephemeral: true });
         }
         if (interaction.customId.startsWith('clan_')) {
             const [action, requestId] = interaction.customId.split('_').slice(1);
             const request = db.prepare('SELECT * FROM clan_requests WHERE request_id = ? AND status = ?').get(requestId, 'pending');
-            if (!request) return interaction.update({ content: 'این درخواست دیگر معتبر نیست.', components: [] });
+            if (!request) return interaction.update({ content: 'This request is no longer valid or has already been actioned.', components: [] });
             const clan = db.prepare('SELECT * FROM clans WHERE clan_id = ?').get(request.clan_id);
-            if (clan.owner_id !== interaction.user.id) return interaction.reply({ content: 'شما اجازه مدیریت این درخواست را ندارید!', ephemeral: true });
+            if (clan.owner_id !== interaction.user.id) return interaction.reply({ content: 'You do not have permission to manage this request!', ephemeral: true });
             const transaction = db.transaction(() => {
                 if (action === 'accept') {
                     db.prepare('UPDATE users SET clan_id = ? WHERE user_id = ?').run(request.clan_id, request.user_id);
                     db.prepare('UPDATE clan_requests SET status = ? WHERE request_id = ?').run('accepted', requestId);
-                    
                     interaction.guild.members.fetch(request.user_id).then(member => {
                         if (member && clan.role_id) {
                             member.roles.add(clan.role_id);
                         }
                     }).catch(console.error);
-
-                    interaction.update({ content: `✅ درخواست عضویت قبول شد.`, components: [] });
-                    client.users.fetch(request.user_id).then(user => user.send(`درخواست عضویت شما در کلن **${clan.name}** تایید شد!`)).catch(console.error);
+                    interaction.update({ content: `✅ Join request accepted.`, components: [] });
+                    client.users.fetch(request.user_id).then(user => user.send(`Your request to join the clan **${clan.name}** has been approved!`)).catch(console.error);
                 } else if (action === 'deny') {
                     db.prepare('UPDATE clan_requests SET status = ? WHERE request_id = ?').run('denied', requestId);
-                    interaction.update({ content: `❌ درخواست عضویت رد شد.`, components: [] });
-                    client.users.fetch(request.user_id).then(user => user.send(`متاسفانه درخواست عضویت شما در کلن **${clan.name}** رد شد.`)).catch(console.error);
+                    interaction.update({ content: `❌ Join request denied.`, components: [] });
+                    client.users.fetch(request.user_id).then(user => user.send(`Unfortunately, your request to join the clan **${clan.name}** was denied.`)).catch(console.error);
                 }
             });
             transaction();
@@ -200,9 +205,9 @@ client.on(Events.InteractionCreate, async interaction => {
     } catch (error) {
         console.error(error);
         if (interaction.replied || interaction.deferred) {
-            await interaction.followUp({ content: 'خطایی در اجرای این دستور رخ داد!', ephemeral: true });
+            await interaction.followUp({ content: 'An error occurred while executing this command!', ephemeral: true });
         } else {
-            await interaction.reply({ content: 'خطایی در اجرای این دستور رخ داد!', ephemeral: true });
+            await interaction.reply({ content: 'An error occurred while executing this command!', ephemeral: true });
         }
     }
 });
@@ -241,7 +246,7 @@ client.on(Events.GuildMemberAdd, async member => {
         const welcomeMessage = `سلام ${member}، به سرور ما خوش اومدی! 🎉`;
         welcomeChannel.send({ content: welcomeMessage, files: [attachment] });
     } catch (error) {
-        console.error("خطا در ساخت یا ارسال عکس خوش آمدگویی:", error);
+        console.error("Error creating or sending welcome image:", error);
     }
 });
 
@@ -261,7 +266,28 @@ client.on(Events.MessageCreate, async message => {
         const newLevel = userData.level + 1;
         const remainingXp = newXp - xpNeededForNextLevel;
         db.prepare('UPDATE users SET level = ?, xp = ? WHERE user_id = ? AND guild_id = ?').run(newLevel, remainingXp, message.author.id, message.guild.id);
-        message.channel.send(`🎉 تبریک ${message.author}، شما به **سطح ${newLevel}** رسیدید!`);
+        
+        let levelUpMessage = `🎉 تبریک ${message.author}، شما به **سطح ${newLevel}** رسیدید!`;
+
+        if (levelRoles.has(newLevel)) {
+            const roleId = levelRoles.get(newLevel);
+            try {
+                await message.member.roles.add(roleId);
+                levelUpMessage += `\nشما به نقش <@&${roleId}> ارتقا یافتید!`;
+            } catch (error) {
+                console.error(`خطا در اضافه کردن رول جایزه برای سطح ${newLevel}:`, error);
+            }
+        }
+        
+        const levelUpChannelId = '1200126756691116113';
+        const levelUpChannel = message.guild.channels.cache.get(levelUpChannelId);
+        if (levelUpChannel) {
+            levelUpChannel.send(levelUpMessage);
+        } else {
+            message.channel.send(levelUpMessage);
+            console.warn(`کانال تبریک سطح با آیدی ${levelUpChannelId} پیدا نشد.`);
+        }
+
         if (userData.clan_id) {
             const clanXpToAdd = 5;
             const clanData = db.prepare('SELECT * FROM clans WHERE clan_id = ?').get(userData.clan_id);
@@ -272,7 +298,11 @@ client.on(Events.MessageCreate, async message => {
                     const newClanLevel = clanData.level + 1;
                     const remainingClanXp = newClanXp - xpNeededForClanLevelUp;
                     db.prepare('UPDATE clans SET level = ?, xp = ? WHERE clan_id = ?').run(newClanLevel, remainingClanXp, userData.clan_id);
-                    message.channel.send(`⚔️ کلن **${clanData.name}** به **سطح ${newClanLevel}** رسید!`);
+                    if (levelUpChannel) {
+                        levelUpChannel.send(`⚔️ کلن **${clanData.name}** به **سطح ${newClanLevel}** رسید!`);
+                    } else {
+                        message.channel.send(`⚔️ کلن **${clanData.name}** به **سطح ${newClanLevel}** رسید!`);
+                    }
                 } else {
                     db.prepare('UPDATE clans SET xp = ? WHERE clan_id = ?').run(newClanXp, userData.clan_id);
                 }
